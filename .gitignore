@@ -11,3 +11,12 @@ wheels/
 
 # Subagent-driven-development scratch workspace
 .superpowers/
+
+# Environment variables
+.env
+
+# Local data & logs (keep the directory, ignore contents)
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
