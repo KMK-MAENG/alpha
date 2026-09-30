@@ -78,7 +78,8 @@ data.binance.vision 데이터(679개, 폐지 154개)로 2021-01 ~ 2026-08을 다
 
 - 전략: 결합 50:50 + 진입 확인 + 시계열 엔진 숏 (`strategies.momentum.combined_weights(closes, **LIVE_OPTIONS)`) — 백테스트와 같은 함수를 쓴다
 - 실행: 하루 1회 실행 스크립트 `python -m alpha.live.runner`, 매일 UTC 00:05(한국 09:05)에 스케줄러(cron)가 실행
-- 가동 절차: 실계좌. 기본은 dry-run(계산·기록만), `--live`를 명시해야 실주문
+- 가동 절차: 실계좌, dry-run 기간 없이 바로 실주문 (2026-09-30 결정). 서버 cron은 `--live`로 등록한다.
+  실행기를 손으로 돌릴 때는 기본이 dry-run(계산·기록만)이라 `--live`가 없으면 주문이 나가지 않는다
 - 주문: 시장가. 줄이는 주문을 먼저, 늘리는 주문을 나중에(증거금 확보)
 - 계좌 설정: 단방향(one-way) 포지션 모드, 교차 증거금, 코인별 레버리지 설정 3배(증거금 여유용일 뿐 실제 노출은 전략 비중이 정함)
 
@@ -124,12 +125,19 @@ data.binance.vision 데이터(679개, 폐지 154개)로 2021-01 ~ 2026-08을 다
    `uv run python -m alpha.live.notify --test`로 확인. 매 실행(dry-run 포함) 후 잔고·전일/누적 손익·진입·청산(손익)·조정·보유 현황을
    보내고, 실행이 실패하거나 안전장치로 중단되면 경고를 보낸다. 누적 손익은 같은 모드의 첫 실행 잔고 기준이라 입출금이 섞인다
 3. `uv run python -m alpha.live.runner --setup` — 교차 증거금·레버리지 3배 설정 (한 번)
-4. `uv run python -m alpha.live.runner` — dry-run으로 목표·주문 목록 확인 (며칠)
-5. `uv run python -m alpha.live.runner --live` — 첫 실주문은 직접 지켜보며 실행
+4. (선택) `uv run python -m alpha.live.runner` — 주문 없이 목표·주문 목록만 확인
+5. `uv run python -m alpha.live.runner --live` — 바로 시작하려면 수동 실행, 아니면 다음 09:05 cron이 첫 실주문
 6. 텔레그램 조회 봇 (`live/bot.py`, 상시 실행): `deploy/alpha-bot.service`를 systemd에 등록한다.
    명령 /balance /positions /pnl /last /status /help, 설정된 채팅에만 응답, 조회 전용(주문 없음). 매매 실행기와 별도 프로세스라
    봇이 죽어도 매매에는 영향이 없다. `notify --chat-id`는 봇을 켜기 전에 실행할 것 (둘 다 getUpdates를 써서 충돌)
 7. cron 등록: `5 0 * * * cd <프로젝트> && uv run python -m alpha.live.runner --live >> logs/live/cron.log 2>&1` (UTC 기준)
+
+## EC2 배포
+
+`deploy/setup_ec2.sh` (Ubuntu 24.04, x86_64, 도쿄 리전, Elastic IP). 여러 번 실행해도 안전하고, 준비가 필요한 단계에서 멈춘다:
+패키지·UTC → uv → GitHub 배포 키(읽기 전용) → 저장소·의존성 → .env(chmod 600) → 조회 봇 systemd →
+바이낸스 연결 확인(주문 없음: 잔고·단방향 모드, 공인 IP 출력) → 계좌 설정(`runner --setup`) → 매매 cron(실주문) → 텔레그램 테스트.
+코드 갱신도 같은 스크립트를 다시 실행한다.
 
 ## 범위 밖
 
