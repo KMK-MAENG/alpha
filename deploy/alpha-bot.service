@@ -1,0 +1,20 @@
+# 텔레그램 조회 봇 (상시 실행, 조회 전용) — EC2 Ubuntu 기준. 경로·사용자는 서버에 맞게 고친다.
+#   sudo cp deploy/alpha-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now alpha-bot
+#   상태: systemctl status alpha-bot   로그: journalctl -u alpha-bot -f
+[Unit]
+Description=alpha 텔레그램 조회 봇
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/alpha
+ExecStart=/home/ubuntu/.local/bin/uv run python -m alpha.live.bot
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
