@@ -58,7 +58,7 @@ def format_report(record: dict, previous: dict | None, first: dict | None, trans
     transfers = transfers or {}
     kst = pd.Timestamp(record["time"]).tz_convert("Asia/Seoul")
     b = record["balances"]
-    lines = [f"📊 alpha 모멘텀 [{MODE_LABEL[record['mode']]}] {kst:%Y-%m-%d %H:%M} KST (일봉 {record['last_bar']})"]
+    lines = [f"📊 alpha 모멘텀+캐리 [{MODE_LABEL[record['mode']]}] {kst:%Y-%m-%d %H:%M} KST (일봉 {record['last_bar']})"]
     balance = f"💰 잔고 {_usdt(b['equity'])} USDT"
     if "wallet" in b:
         balance += f" (지갑 {_usdt(b['wallet'])} + 미실현 {_usdt(b['unrealized'], True)}, 사용 가능 {_usdt(b['available'])})"
@@ -90,6 +90,10 @@ def format_report(record: dict, previous: dict | None, first: dict | None, trans
     h = record["holdings"]
     lines.append(f"📦 보유 {h['long'] + h['short']}개 (롱 {h['long']} / 숏 {h['short']}) | "
                  f"노출 롱 {h['long_exposure']:.1%} 숏 {h['short_exposure']:.1%}")
+    if "strategy_exposure" in record:  # 상쇄 전 전략별 목표 (이전 기록에는 없음)
+        e = record["strategy_exposure"]
+        lines.append(f"🎯 목표 | 모멘텀 롱 {e['momentum']['long']:.1%} 숏 {e['momentum']['short']:.1%} | "
+                     f"캐리 롱 {e['carry']['long']:.1%} 숏 {e['carry']['short']:.1%}")
     if record["skipped"]:
         lines.append(f"⚪ 최소 주문 미만 건너뜀 {len(record['skipped'])}: {', '.join(record['skipped'])}")
     if record["failures"]:
@@ -101,7 +105,7 @@ def format_report(record: dict, previous: dict | None, first: dict | None, trans
 
 
 def format_failure(mode: str, error: Exception) -> str:
-    return (f"🚨 alpha 모멘텀 실행 실패 [{MODE_LABEL[mode]}]\n{type(error).__name__}: {error}\n"
+    return (f"🚨 alpha 모멘텀+캐리 실행 실패 [{MODE_LABEL[mode]}]\n{type(error).__name__}: {error}\n"
             "주문은 나가지 않았거나 일부만 나갔을 수 있다. 서버 로그(logs/live/)를 확인할 것")
 
 

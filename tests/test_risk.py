@@ -13,6 +13,16 @@ def test_data_is_fresh_only_when_last_bar_is_yesterday():
         risk.check_data_fresh(pd.Timestamp("2026-09-27", tz="UTC"), NOW)
 
 
+def test_funding_is_fresh_only_with_enough_recent_records():
+    recent = pd.Series([0.0001], index=[NOW - pd.Timedelta(hours=8)])
+    old = pd.Series([0.0001], index=[NOW - pd.Timedelta(days=3)])
+    risk.check_funding_fresh({f"C{i}": recent for i in range(15)}, NOW)
+    with pytest.raises(risk.RiskError, match="펀딩"):
+        risk.check_funding_fresh({f"C{i}": recent if i < 14 else old for i in range(20)}, NOW)
+    with pytest.raises(risk.RiskError, match="펀딩"):
+        risk.check_funding_fresh({f"C{i}": pd.Series(dtype=float) for i in range(20)}, NOW)
+
+
 def test_gross_exposure_cap():
     risk.check_weights(pd.Series({"A": 0.8, "B": -0.6}))
     with pytest.raises(risk.RiskError, match="노출"):

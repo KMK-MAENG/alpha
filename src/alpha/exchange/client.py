@@ -23,6 +23,21 @@ class BinanceFutures:
             closes[symbol] = series[series.index < today]
         return pd.DataFrame(closes)
 
+    def funding_rates(self, symbols: list[str], start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.Series]:
+        """코인별 [start, end) 정산 펀딩비 (정산 시각 UTC 인덱스)."""
+        out = {}
+        for symbol in symbols:
+            start_ms, end_ms, rows = int(start.timestamp() * 1000), int(end.timestamp() * 1000), []
+            while True:
+                page = self._client.futures_funding_rate(symbol=symbol, startTime=start_ms, endTime=end_ms - 1, limit=1000)
+                rows += page
+                if len(page) < 1000:
+                    break
+                start_ms = page[-1]["fundingTime"] + 1
+            index = pd.to_datetime([r["fundingTime"] for r in rows], unit="ms", utc=True)
+            out[symbol] = pd.Series([float(r["fundingRate"]) for r in rows], index=index, dtype=float)
+        return out
+
     def rules(self) -> dict[str, SymbolRules]:
         """거래 중인 무기한 선물의 주문 규칙."""
         out = {}

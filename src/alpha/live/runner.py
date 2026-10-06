@@ -1,9 +1,10 @@
-"""하루 1회 실행: 결합 50:50(진입 확인 + 시계열 숏, momentum.LIVE_OPTIONS) 목표 비중을 계산해 바이낸스 USDT-M 선물 포지션을 맞춘다.
+"""하루 1회 실행: 모멘텀 결합(momentum.LIVE_OPTIONS)과 펀딩 캐리(carry.LIVE_OPTIONS)를 평가금액 50:50으로 합친
+목표 비중(strategies.portfolio)을 계산해 바이낸스 USDT-M 선물 포지션을 맞춘다. 두 전략은 한 계좌에서 코인별 순비중으로 상쇄된다.
 
 매일 UTC 00:05(한국 09:05)에 실행한다. 기본은 dry-run(계산·기록만), --live를 명시해야 실주문.
 전략 코인(UNIVERSE) 밖의 포지션은 건드리지 않는다. 다시 실행해도 목표와의 차이만 주문한다.
 기록: logs/live/<UTC 시각>_<모드>.json. 실행 결과는 텔레그램으로 보고하고, 실패하면 경고를 보낸다 (live/notify.py).
-설계: docs/superpowers/specs/2026-09-29-momentum-live-trading-design.md
+설계: docs/superpowers/specs/2026-09-29-momentum-live-trading-design.md, 캐리: docs/superpowers/specs/2026-10-06-funding-carry-research.md
 
 실행 (프로젝트 루트에서):
   uv run python -m alpha.live.runner --setup         # 교차 증거금·레버리지 설정 (최초 1회)
@@ -24,9 +25,10 @@ from alpha.exchange.client import BinanceFutures
 from alpha.execution import risk
 from alpha.execution.order_manager import Order, plan_orders, target_quantities
 from alpha.live import notify
-from alpha.strategies import momentum
+from alpha.strategies import momentum, portfolio
 
 LOOKBACK_DAYS = 300  # 신호(120일) + 변동성(60일) + 변동성 타게팅(60일)에 충분한 길이
+FUNDING_DAYS = 20  # 캐리 신호: 직전 일요일 봉 마감 전 7일 펀딩 (최대 13일 전부터)
 LEVERAGE = 3  # 거래소 레버리지 설정 (증거금 여유용, 실제 노출은 전략 비중이 정한다)
 LOG_DIR = Path("logs/live")
 
@@ -43,7 +45,10 @@ def run(exchange, live: bool, equity: float | None = None, now: pd.Timestamp | N
     rules = exchange.rules()
     closes = exchange.daily_closes([s for s in momentum.UNIVERSE if s in rules], LOOKBACK_DAYS, now)
     risk.check_data_fresh(closes.index[-1], now)
-    weights = momentum.combined_weights(closes, **momentum.LIVE_OPTIONS).iloc[-1]
+    fundings = exchange.funding_rates(list(closes.columns), now - pd.Timedelta(days=FUNDING_DAYS), now)
+    risk.check_funding_fresh(fundings, now)
+    parts = {k: w.iloc[-1] for k, w in portfolio.live_weights(closes, fundings).items()}
+    weights = parts["total"]
     risk.check_weights(weights)
 
     if use_account:
@@ -86,6 +91,10 @@ def run(exchange, live: bool, equity: float | None = None, now: pd.Timestamp | N
             "short_exposure": float((-after.clip(upper=0) * prices.reindex(after.index)).sum() / equity),
         },
         "gross_target": float(weights.abs().sum()),
+        "strategy_exposure": {  # 상쇄 전 전략별 목표 노출 (평가금액 대비)
+            k: {"long": float(parts[k].clip(lower=0).sum()), "short": float(-parts[k].clip(upper=0).sum())}
+            for k in ("momentum", "carry")
+        },
         "weights": {k: float(v) for k, v in weights.items() if v != 0},
         "targets": {k: float(v) for k, v in targets.items() if v != 0},
         "positions": {k: float(v) for k, v in positions.items()},

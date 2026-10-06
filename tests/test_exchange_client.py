@@ -56,6 +56,13 @@ class FakeClient:
         ]
         return [r for r in rows if r["incomeType"] == incomeType and startTime <= r["time"] <= endTime]
 
+    def futures_funding_rate(self, symbol, startTime, endTime, limit):
+        ms = lambda t: int(pd.Timestamp(t, tz="UTC").timestamp() * 1000)
+        rows = [{"symbol": symbol, "fundingTime": ms("2026-09-27 00:00") + 8 * 3_600_000 * i + 3, "fundingRate": f"{i * 1e-5:.5f}"}
+                for i in range(7)]
+        inside = [r for r in rows if startTime <= r["fundingTime"] <= endTime]
+        return inside[:limit]
+
     def futures_get_position_mode(self):
         return {"dualSidePosition": False}
 
@@ -114,3 +121,10 @@ def test_setup_ignores_already_set_margin_type(exchange):
 def test_net_transfers_sums_usdt_transfers_in_period(exchange):
     start, end = pd.Timestamp("2026-09-29", tz="UTC"), pd.Timestamp("2026-10-01", tz="UTC")
     assert exchange.net_transfers(start, end) == pytest.approx(700.0)
+
+
+def test_funding_rates_in_period(exchange):
+    rates = exchange.funding_rates(["AAAUSDT"], pd.Timestamp("2026-09-27 08:00", tz="UTC"), pd.Timestamp("2026-09-28 16:00", tz="UTC"))
+    f = rates["AAAUSDT"]
+    assert f.tolist() == pytest.approx([1e-5, 2e-5, 3e-5, 4e-5])  # 끝 시각 정산은 제외
+    assert f.index[0] == pd.Timestamp("2026-09-27 08:00:00.003", tz="UTC")

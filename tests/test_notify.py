@@ -35,6 +35,13 @@ def test_report_contains_balance_pnl_entries_and_exits():
     assert "롱 40 / 숏 4" in text and "IOSTUSDT" in text
 
 
+def test_report_shows_strategy_exposure_when_recorded():
+    assert "🎯" not in notify.format_report(RECORD, None, None)  # 이전 기록 형식
+    exposure = {"momentum": {"long": 0.21, "short": 0.05}, "carry": {"long": 0.25, "short": 0.2}}
+    text = notify.format_report(RECORD | {"strategy_exposure": exposure}, None, None)
+    assert "모멘텀 롱 21.0% 숏 5.0%" in text and "캐리 롱 25.0% 숏 20.0%" in text
+
+
 def test_report_marks_failures():
     record = RECORD | {"failures": 1, "results": [{"order": {"symbol": "ETHUSDT"}, "error": "APIError(-2019)"}]}
     text = notify.format_report(record, None, None)

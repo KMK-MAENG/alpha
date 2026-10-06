@@ -7,7 +7,7 @@ import pytest
 from alpha.execution.order_manager import SymbolRules
 from alpha.execution.risk import RiskError
 from alpha.live import runner
-from alpha.strategies import momentum
+from alpha.strategies import momentum, portfolio
 from alpha.strategies.momentum import UNIVERSE
 
 NOW = pd.Timestamp("2026-09-29 00:05", tz="UTC")
@@ -21,6 +21,9 @@ class FakeExchange:
         drift = np.linspace(-0.004, 0.004, len(COINS))
         rets = drift + rng.normal(0, 0.02, (len(index), len(COINS)))
         self.closes = pd.DataFrame(100 * np.cumprod(1 + rets, axis=0), index=index, columns=COINS)
+        settle = pd.date_range(index[0], pd.Timestamp(last_bar, tz="UTC") + pd.Timedelta(days=1), freq="8h")
+        rates = rng.normal(1e-4, 2e-4, (len(settle), len(COINS))) + np.linspace(-3e-4, 3e-4, len(COINS))
+        self.fundings = {c: pd.Series(rates[:, i], index=settle) for i, c in enumerate(COINS)}
         self._positions = pd.Series(positions or {}, dtype=float)
         self._unrealized = pd.Series(unrealized or {}, dtype=float)
         self._one_way = one_way
@@ -34,6 +37,9 @@ class FakeExchange:
 
     def daily_closes(self, symbols, days, now):
         return self.closes[symbols].iloc[-days:]
+
+    def funding_rates(self, symbols, start, end):
+        return {s: f[(f.index >= start) & (f.index < end)] for s, f in self.fundings.items() if s in symbols}
 
     def mark_prices(self):
         return self.closes.iloc[-1]
@@ -106,11 +112,24 @@ def test_equity_override_is_only_for_dry_run(tmp_path):
         runner.run(FakeExchange(), live=True, equity=1000.0, now=NOW, log_dir=tmp_path)
 
 
-def test_runner_uses_live_strategy_options(tmp_path):
+def test_runner_targets_momentum_plus_carry_portfolio(tmp_path):
     exchange = FakeExchange()
     record = runner.run(exchange, live=False, now=NOW, log_dir=tmp_path)
-    expected = momentum.combined_weights(exchange.closes, **momentum.LIVE_OPTIONS).iloc[-1]
+    parts = portfolio.live_weights(exchange.closes, exchange.fundings)  # 전체 이력으로 계산해도 같아야 한다
+    expected = parts["total"].iloc[-1]
     assert record["weights"] == pytest.approx({k: v for k, v in expected.items() if v != 0})
+    mom = momentum.combined_weights(exchange.closes, **momentum.LIVE_OPTIONS).iloc[-1]
+    assert parts["momentum"].iloc[-1].to_numpy() == pytest.approx(0.5 * mom.to_numpy())
+    carry = record["strategy_exposure"]["carry"]
+    assert carry["long"] == pytest.approx(0.25) and carry["short"] == pytest.approx(0.25)  # 캐리 50% × 다리 0.5
+
+
+def test_stale_funding_aborts_without_orders(tmp_path):
+    exchange = FakeExchange()
+    exchange.fundings = {c: f[f.index < NOW - pd.Timedelta(days=2)] for c, f in exchange.fundings.items()}
+    with pytest.raises(RiskError, match="펀딩"):
+        runner.run(exchange, live=True, now=NOW, log_dir=tmp_path)
+    assert exchange.placed == []
 
 
 def test_live_opens_shorts_for_confirmed_downtrends(tmp_path):
