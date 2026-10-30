@@ -17,6 +17,7 @@ import pandas as pd
 import alpha.config  # noqa: F401 — .env 로드
 
 API = "https://api.telegram.org/bot{token}/{method}"
+FX_URL = "https://query1.finance.yahoo.com/v8/finance/chart/KRW=X?range=5d&interval=1d"  # 원달러 (키 없음, 평일 24시간)
 MAX_LENGTH = 4000  # 텔레그램 메시지 한도는 4096자
 MODE_LABEL = {"live": "실주문", "dry-run": "DRY-RUN"}
 
@@ -41,6 +42,29 @@ def _usdt(x: float, sign: bool = False) -> str:
     return f"{x:+,.2f}" if sign else f"{x:,.2f}"
 
 
+def usd_krw() -> dict | None:
+    """원달러 환율: 현재가와 전 거래일 종가. 실패하면 None (보고는 원화 줄 없이 보낸다)."""
+    try:
+        request = urllib.request.Request(FX_URL, headers={"User-Agent": "Mozilla/5.0"})
+        chart = json.load(urllib.request.urlopen(request, timeout=10))["chart"]["result"][0]
+        closes = [c for c in chart["indicators"]["quote"][0]["close"] if c is not None]
+        time = pd.Timestamp(chart["meta"]["regularMarketTime"], unit="s", tz="UTC")
+        return {"rate": float(chart["meta"]["regularMarketPrice"]), "previous": float(closes[-2]), "time": time.isoformat()}
+    except Exception as e:  # 환율이 보고·매매를 막지 않도록
+        print(f"환율 조회 실패: {e!r}")
+        return None
+
+
+def krw_lines(usdt: float, fx: dict | None) -> list[str]:
+    """USDT 금액의 원화 환산과 환율 변동(전 거래일 종가 대비)이 원화 평가에 준 영향. USDT ≈ USD로 본다."""
+    if not fx:
+        return []
+    rate, previous = fx["rate"], fx["previous"]
+    change = rate - previous
+    return [f"💴 원화 환산 {usdt * rate:,.0f}원 (USD/KRW {rate:,.2f})",
+            f"   환율 전 거래일 대비 {change:+,.2f}원 ({change / previous:+.2%}) → 원화 평가 영향 {usdt * change:+,.0f}원"]
+
+
 def pnl_line(label: str, now: float, before: dict | None, transfer: float) -> str | None:
     """손익 = 평가금액 변화 - 순입금액. 수익률 분모는 기준 잔고 + 추가 입금 (출금은 빼지 않는다)."""
     if not before or "balances" not in before:
@@ -63,6 +87,7 @@ def format_report(record: dict, previous: dict | None, first: dict | None, trans
     if "wallet" in b:
         balance += f" (지갑 {_usdt(b['wallet'])} + 미실현 {_usdt(b['unrealized'], True)}, 사용 가능 {_usdt(b['available'])})"
     lines.append(balance)
+    lines += krw_lines(b["equity"], record.get("fx"))
     lines += [
         x for x in (
             pnl_line("   전일", b["equity"], previous, transfers.get("previous", 0.0)),

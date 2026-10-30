@@ -6,12 +6,18 @@ import pytest
 
 from alpha.execution.order_manager import SymbolRules
 from alpha.execution.risk import RiskError
-from alpha.live import runner
+from alpha.live import notify, runner
 from alpha.strategies import momentum, portfolio
 from alpha.strategies.momentum import UNIVERSE
 
 NOW = pd.Timestamp("2026-09-29 00:05", tz="UTC")
 COINS = UNIVERSE[:25]
+
+
+@pytest.fixture(autouse=True)
+def fixed_fx(monkeypatch):
+    """테스트가 실제 환율 API에 접속하지 않도록."""
+    monkeypatch.setattr(notify, "usd_krw", lambda: {"rate": 1300.0, "previous": 1290.0})
 
 
 class FakeExchange:
@@ -195,3 +201,10 @@ def test_failed_run_leaves_failure_record(tmp_path):
     failed = json.loads(next(tmp_path.glob("*_live_failed.json")).read_text())
     assert failed["mode"] == "live" and "RiskError" in failed["error"]
     assert runner._records(tmp_path, "live", "2099") == []  # 실패 기록은 손익 기준에 쓰지 않는다
+
+
+def test_report_includes_krw_conversion(tmp_path):
+    sent = []
+    record = runner.run_with_report(FakeExchange(), live=False, equity=None, sender=sent.append, log_dir=tmp_path, now=NOW)
+    assert record["fx"]["rate"] == 1300.0
+    assert "원화 환산 2,600,000원" in sent[0] and "+10.00원" in sent[0]  # 2,000 × 1,300

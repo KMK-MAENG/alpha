@@ -22,7 +22,7 @@ from alpha.strategies.momentum import UNIVERSE
 
 HELP = (
     "📖 alpha 조회 봇 (조회 전용)\n"
-    "/balance — 잔고 (평가금액·지갑·미실현·사용 가능)\n"
+    "/balance — 잔고 (평가금액·지갑·미실현·사용 가능, 원화 환산)\n"
     "/positions — 보유 포지션 (진입가·현재가·손익·비중)\n"
     "/pnl — 마지막 실행 이후·누적 손익 (입출금 제외)\n"
     "/last — 마지막 실행 보고 다시 보기\n"
@@ -36,8 +36,9 @@ def _kst(t: str | pd.Timestamp) -> str:
 
 def balance(exchange) -> str:
     b = exchange.balances()
-    return (f"💰 평가금액 {b['equity']:,.2f} USDT\n지갑 {b['wallet']:,.2f} | 미실현 {b['unrealized']:+,.2f} | "
-            f"사용 가능 {b['available']:,.2f}")
+    lines = [f"💰 평가금액 {b['equity']:,.2f} USDT", f"지갑 {b['wallet']:,.2f} | 미실현 {b['unrealized']:+,.2f} | "
+             f"사용 가능 {b['available']:,.2f}"]
+    return "\n".join(lines + notify.krw_lines(b["equity"], notify.usd_krw()))
 
 
 def positions(exchange) -> str:

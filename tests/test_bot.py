@@ -3,9 +3,15 @@ import json
 import pandas as pd
 import pytest
 
-from alpha.live import bot
+from alpha.live import bot, notify
 
 NOW = pd.Timestamp("2026-10-01 03:00", tz="UTC")  # 한국 12:00
+
+
+@pytest.fixture(autouse=True)
+def fixed_fx(monkeypatch):
+    """테스트가 실제 환율 API에 접속하지 않도록."""
+    monkeypatch.setattr(notify, "usd_krw", lambda: {"rate": 1300.0, "previous": 1290.0})
 
 
 class FakeExchange:
@@ -34,6 +40,7 @@ def write(log_dir, name, record):
 def test_balance():
     text = bot.handle("/balance", FakeExchange(), log_dir=None, now=NOW)
     assert "2,034.12" in text and "+23.62" in text and "1,500.00" in text
+    assert "원화 환산 2,644,356원" in text  # 2,034.12 × 1,300
 
 
 def test_positions_show_side_pnl_weight_and_outside_strategy():

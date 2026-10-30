@@ -1,3 +1,5 @@
+import io
+import json
 import urllib.parse
 
 import pytest
@@ -81,3 +83,26 @@ def test_report_excludes_deposits_and_withdrawals_from_pnl():
     # 잔고 2,034.12 중 1,000은 입금 → 전일 손익 0, 누적 +34.12 (투입 2,000 대비 +1.71%)
     assert "전일 +0.00 (+0.00%" in text and "누적 +34.12 (+1.71%" in text
     assert "입출금 +1,000.00 제외" in text
+
+
+def test_usd_krw_reads_current_rate_and_previous_close(monkeypatch):
+    chart = {"chart": {"result": [{
+        "meta": {"regularMarketPrice": 1337.0, "regularMarketTime": 1793334728},
+        "indicators": {"quote": [{"close": [1321.76, None, 1340.34, 1337.0]}]},
+    }]}}
+    monkeypatch.setattr(notify.urllib.request, "urlopen", lambda request, timeout: io.BytesIO(json.dumps(chart).encode()))
+    fx = notify.usd_krw()
+    assert fx["rate"] == 1337.0 and fx["previous"] == 1340.34
+
+    def boom(request, timeout):
+        raise OSError("network down")
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+    assert notify.usd_krw() is None
+
+
+def test_report_shows_krw_value_and_fx_change_when_recorded():
+    assert "원화" not in notify.format_report(RECORD, None, None)  # 환율 없으면 원화 줄 없음
+    text = notify.format_report(RECORD | {"fx": {"rate": 1340.0, "previous": 1330.0}}, None, None)
+    assert "원화 환산 2,725,721원" in text  # 2,034.12 × 1,340
+    assert "+10.00원 (+0.75%)" in text and "원화 평가 영향 +20,341원" in text  # 2,034.12 × 10

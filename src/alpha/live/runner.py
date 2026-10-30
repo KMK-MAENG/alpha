@@ -33,8 +33,10 @@ LEVERAGE = 3  # 거래소 레버리지 설정 (증거금 여유용, 실제 노�
 LOG_DIR = Path("logs/live")
 
 
-def run(exchange, live: bool, equity: float | None = None, now: pd.Timestamp | None = None, log_dir: Path = LOG_DIR) -> dict:
-    """equity를 주면 계좌 조회 없이 그 평가금액·무포지션으로 계산만 한다 (dry-run 전용 미리보기)."""
+def run(exchange, live: bool, equity: float | None = None, now: pd.Timestamp | None = None, log_dir: Path = LOG_DIR,
+        fx: dict | None = None) -> dict:
+    """equity를 주면 계좌 조회 없이 그 평가금액·무포지션으로 계산만 한다 (dry-run 전용 미리보기).
+    fx(원달러 환율, notify.usd_krw)는 보고용으로 기록에만 남긴다."""
     if live and equity is not None:
         raise ValueError("--equity 미리보기는 dry-run 전용이다")
     now = now or pd.Timestamp.now(tz="UTC")
@@ -82,6 +84,7 @@ def run(exchange, live: bool, equity: float | None = None, now: pd.Timestamp | N
         "last_bar": str(closes.index[-1].date()),
         "equity": equity,
         "balances": balances,
+        "fx": fx,
         "transfers_since_previous": transfers,
         "changes": changes,
         "holdings": {
@@ -154,7 +157,7 @@ def run_with_report(exchange, live: bool, equity: float | None, sender=notify.se
     """run()을 실행하고 결과를 보고한다. 실패하면 경고를 보낸 뒤 예외를 그대로 올린다."""
     mode = "live" if live else "dry-run"
     try:
-        record = run(exchange, live=live, equity=equity, now=now, log_dir=log_dir)
+        record = run(exchange, live=live, equity=equity, now=now, log_dir=log_dir, fx=notify.usd_krw())
     except Exception as e:
         failed_at = now or pd.Timestamp.now(tz="UTC")
         log_dir.mkdir(parents=True, exist_ok=True)
