@@ -1,10 +1,11 @@
 """텔레그램 조회 봇 (상시 실행, 조회 전용). .env의 TELEGRAM_CHAT_ID에서 온 명령에만 응답한다.
 
-명령: /balance 잔고 · /positions 보유 포지션 · /pnl 손익 · /last 마지막 실행 보고 · /status 실행 상태 · /help
+명령: /balance 잔고 · /positions 보유 포지션 · /pnl 손익 · /chart 누적 수익률 차트 · /last 마지막 실행 보고 · /status 실행 상태 · /help
 매매 실행기(runner, cron 하루 1회)와 별도 프로세스이며 주문은 내지 않는다. 시작할 때 꺼져 있던 동안 쌓인 명령은 건너뛴다.
 
 실행 (프로젝트 루트에서): uv run python -m alpha.live.bot   — 서버에서는 deploy/alpha-bot.service(systemd)로 상시 실행
 """
+import io
 import json
 import os
 import sys
@@ -14,6 +15,7 @@ import urllib.request
 from pathlib import Path
 
 import pandas as pd
+from matplotlib.figure import Figure
 
 from alpha.config import get_env
 from alpha.exchange.client import BinanceFutures
@@ -25,6 +27,7 @@ HELP = (
     "/balance — 잔고 (평가금액·지갑·미실현·사용 가능, 원화 환산)\n"
     "/positions — 보유 포지션 (진입가·현재가·손익·비중)\n"
     "/pnl — 마지막 실행 이후·누적 손익 (입출금 제외)\n"
+    "/chart — 누적 수익률 차트 (실주문 실행 기록 + 현재, 입출금 제외)\n"
     "/last — 마지막 실행 보고 다시 보기\n"
     "/status — 마지막 실행 결과와 다음 실행 시각"
 )
@@ -75,6 +78,44 @@ def pnl(exchange, log_dir: Path, now: pd.Timestamp) -> str:
     )
 
 
+def chart(exchange, log_dir: Path, now: pd.Timestamp) -> tuple[bytes, str] | str:
+    """실주문 실행 기록마다의 누적 수익률(+현재)을 그린 PNG와 캡션. 수익률은 /pnl의 누적과 같은 정의
+    (평가금액 변화 - 순입금액) / (첫 잔고 + 추가 입금). 서버에 한글 글꼴이 없을 수 있어 그림 안 글자는 영어로 쓴다."""
+    earlier = runner._records(log_dir, "live", now.isoformat())
+    if not earlier:
+        return "📈 실주문 기록이 아직 없음 (차트는 실주문 실행 기록 기준)"
+    base = earlier[0]["balances"]["equity"]
+    times, equities, transfers = [], [], []
+    total = 0.0
+    for i, r in enumerate(earlier):
+        total += r.get("transfers_since_previous", 0.0) if i else 0.0
+        times.append(pd.Timestamp(r["time"])); equities.append(r["balances"]["equity"]); transfers.append(total)
+    times.append(now); equities.append(exchange.balances()["equity"])
+    transfers.append(total + exchange.net_transfers(pd.Timestamp(earlier[-1]["time"]), now))
+    ret = pd.Series([(e - base - t) / (base + max(t, 0.0)) for e, t in zip(equities, transfers)],
+                    index=pd.DatetimeIndex(times).tz_convert("Asia/Seoul").tz_localize(None))
+    wealth = 1 + ret
+    drawdown = wealth / wealth.cummax() - 1
+
+    fig = Figure(figsize=(8, 4.5), dpi=120)
+    ax = fig.subplots()
+    ax.plot(ret.index, ret * 100, color="#1f77b4", linewidth=1.8)
+    ax.fill_between(ret.index, ret * 100, 0, where=ret >= 0, interpolate=True, color="#1f77b4", alpha=0.15)
+    ax.fill_between(ret.index, ret * 100, 0, where=ret < 0, interpolate=True, color="#d62728", alpha=0.15)
+    ax.axhline(0, color="gray", linewidth=0.8)
+    ax.set_title(f"alpha cumulative return (live, transfers excluded): {ret.iloc[-1]:+.2%}")
+    ax.set_ylabel("%")
+    ax.grid(alpha=0.3)
+    fig.autofmt_xdate()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", bbox_inches="tight")
+
+    since = ret.index[0].strftime("%Y-%m-%d")
+    caption = (f"📈 누적 수익률 {ret.iloc[-1]:+.2%} ({since} 이후 실주문 {len(earlier)}회, 입출금 제외)\n"
+               f"현재 평가금액 {equities[-1]:,.2f} USDT | 고점 대비 {drawdown.iloc[-1]:+.2%} | 최대 낙폭 {drawdown.min():+.2%}")
+    return buffer.getvalue(), caption
+
+
 def _latest(log_dir: Path, pattern: str) -> dict | None:
     files = sorted(log_dir.glob(pattern), key=lambda p: json.loads(p.read_text())["time"])
     return json.loads(files[-1].read_text()) if files else None
@@ -103,7 +144,8 @@ def status(log_dir: Path, now: pd.Timestamp) -> str:
     return "\n".join(lines)
 
 
-def handle(text: str, exchange, log_dir: Path | None, now: pd.Timestamp | None = None) -> str:
+def handle(text: str, exchange, log_dir: Path | None, now: pd.Timestamp | None = None) -> str | tuple[bytes, str]:
+    """명령에 대한 답. /chart는 (PNG, 캡션), 나머지는 문자열."""
     now = now or pd.Timestamp.now(tz="UTC")
     command = text.strip().split()[0].split("@")[0].lower() if text.strip() else ""
     try:
@@ -113,6 +155,8 @@ def handle(text: str, exchange, log_dir: Path | None, now: pd.Timestamp | None =
             return positions(exchange)
         if command == "/pnl":
             return pnl(exchange, log_dir, now)
+        if command == "/chart":
+            return chart(exchange, log_dir, now)
         if command == "/last":
             return last(log_dir)
         if command == "/status":
@@ -152,7 +196,8 @@ def main() -> None:
             updates = _get_updates(token, offset, timeout=50)
             offset = process_updates(
                 updates, chat_id,
-                reply=lambda text: notify.send(text, token, chat_id),
+                reply=lambda answer: (notify.send_photo(*answer, token, chat_id) if isinstance(answer, tuple)
+                                      else notify.send(answer, token, chat_id)),
                 answer=lambda text: handle(text, exchange, runner.LOG_DIR),
             ) or offset
         except Exception as e:  # 네트워크 오류 등 — 잠시 쉬고 다시 받는다

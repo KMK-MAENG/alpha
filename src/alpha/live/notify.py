@@ -38,6 +38,30 @@ def send(text: str, token: str | None = None, chat_id: str | None = None) -> boo
     return True
 
 
+def send_photo(png: bytes, caption: str, token: str | None = None, chat_id: str | None = None) -> bool:
+    """PNG 이미지를 캡션과 함께 보낸다 (multipart/form-data). 실패해도 예외를 내지 않는다."""
+    token = token or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("텔레그램 설정(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)이 없어 이미지를 보내지 않음")
+        return False
+    boundary = "alphaboundary"
+    fields = b"".join(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+        for k, v in (("chat_id", chat_id), ("caption", caption[:1024]))  # 캡션 한도 1024자
+    )
+    body = (fields + f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n".encode() + png + f"\r\n--{boundary}--\r\n".encode())
+    request = urllib.request.Request(API.format(token=token, method="sendPhoto"), data=body,
+                                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        urllib.request.urlopen(request, timeout=30)
+    except Exception as e:  # 알림 실패가 봇을 멈추지 않도록
+        print(f"텔레그램 이미지 전송 실패: {e!r}")
+        return False
+    return True
+
+
 def _usdt(x: float, sign: bool = False) -> str:
     return f"{x:+,.2f}" if sign else f"{x:,.2f}"
 

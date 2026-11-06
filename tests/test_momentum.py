@@ -159,7 +159,7 @@ def test_four_hour_bars_convert_days_to_bars():
     assert realized == pytest.approx(momentum.TARGET_VOL, rel=0.15)
 
 
-@pytest.mark.parametrize("options", [{}, momentum.LIVE_OPTIONS])
+@pytest.mark.parametrize("options", [{}, momentum.LIVE_OPTIONS, {**momentum.LIVE_OPTIONS, "residual": True}])
 def test_combined_weights_today_do_not_depend_on_history_length(options):
     """실거래는 최근 300일만 받는다 — 오늘 비중이 전체 기록으로 계산한 백테스트와 같아야 한다 (진입 확인은 상태를 기억한다)."""
     closes = trending_closes(n_days=800)
@@ -289,3 +289,51 @@ def test_ts_short_adds_shorts_only_to_time_series_engine():
     ts = momentum.vol_targeted(momentum.time_series_weights(closes, confirm_entry=True, allow_short=True), closes)
     pd.testing.assert_frame_equal(w, 0.5 * dual + 0.5 * ts)
     assert (dual >= 0).all().all() and (w < 0).any().any()
+
+
+def test_residual_momentum_uses_only_past_prices_and_separates_alpha_from_beta():
+    rng = np.random.default_rng(7)
+    n_days, n_coins = 400, 25
+    index = pd.date_range("2024-01-01", periods=n_days, freq="1D", tz="UTC")
+    mkt = 0.005 + rng.normal(0, 0.005, n_days)  # 꾸준한 양의 시장 수익률 (+0.5%/일)
+    betas = np.ones(n_coins)
+    betas[0] = 2.5   # C00: 고베타지만 음의 고유 알파 (원수익률 +1.05%/일로 1위지만 잔차는 -0.2%/일)
+    betas[-1] = 0.5  # C24: 저베타지만 양의 고유 알파 (원수익률 +0.45%/일로 평균 +0.5%보다 낮지만 잔차는 +0.2%/일 1위)
+    alpha = np.zeros(n_coins)
+    alpha[0] = -0.002
+    alpha[-1] = 0.002
+    noise = rng.normal(0, 0.001, (n_days, n_coins))
+    rets = mkt[:, None] * betas[None, :] + alpha[None, :] + noise
+    closes = pd.DataFrame(100 * np.cumprod(1 + rets, axis=0), index=index, columns=[f"C{i:02d}" for i in range(n_coins)])
+
+    res_options = {**momentum.LIVE_OPTIONS, "residual": True}
+    full = momentum.combined_weights(closes, **res_options).iloc[:300]
+    head = momentum.combined_weights(closes.iloc[:300], **res_options)
+    pd.testing.assert_frame_equal(full, head)
+
+    xs_raw = momentum.cross_sectional_weights(closes, long_only=True).iloc[-1]
+    xs_res = momentum.cross_sectional_weights(closes, long_only=True, residual=True).iloc[-1]
+    assert xs_raw["C00"] > 0 and xs_res["C00"] == 0.0  # 원수익률은 고베타 C00을 사지만 잔차 모멘텀은 걸러낸다
+    assert xs_raw["C24"] == 0.0 and xs_res["C24"] > 0  # 원수익률은 저베타 C24를 놓치지만 잔차 모멘텀은 매수한다
+
+
+def test_residual_returns_with_universe_ignores_coins_outside_universe():
+    closes = trending_closes(n_days=400)
+    universe = pd.DataFrame(True, index=closes.index, columns=closes.columns)
+    outside = ["C00", "C24"]
+    universe[outside] = False
+    inside = [c for c in closes.columns if c not in outside]
+
+    altered = closes.copy()
+    altered["C00"] *= np.linspace(1.0, 50.0, len(closes))
+    altered["C24"] *= np.linspace(1.0, 0.01, len(closes))
+
+    pd.testing.assert_frame_equal(
+        momentum.residual_returns(closes, universe=universe)[inside],
+        momentum.residual_returns(altered, universe=universe)[inside],
+    )
+    res_options = {**momentum.LIVE_OPTIONS, "residual": True}
+    pd.testing.assert_frame_equal(
+        momentum.combined_weights(closes, universe=universe, **res_options),
+        momentum.combined_weights(altered, universe=universe, **res_options),
+    )

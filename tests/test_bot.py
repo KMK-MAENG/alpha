@@ -109,3 +109,19 @@ def test_process_updates_answers_only_configured_chat():
     ]
     offset = bot.process_updates(updates, chat_id="42", reply=replies.append, answer=lambda text: f"답:{text}")
     assert offset == 13 and replies == ["답:/balance"]
+
+
+def test_chart_returns_png_and_cumulative_return_excluding_transfers(tmp_path):
+    write(tmp_path, "20260929T000500_live.json", {"time": "2026-09-29T00:05:00+00:00", "balances": {"equity": 1000.0}})
+    write(tmp_path, "20260930T000500_live.json", {"time": "2026-09-30T00:05:00+00:00", "balances": {"equity": 950.0},
+                                                   "transfers_since_previous": 0.0})
+    exchange = FakeExchange()
+    exchange.transfers = 1000.0  # 마지막 실행 이후 1,000 입금
+    png, caption = bot.handle("/chart", exchange, log_dir=tmp_path, now=NOW)
+    assert png.startswith(b"\x89PNG")
+    assert "+1.71%" in caption  # (2,034.12 - 1,000 - 1,000) / (1,000 + 1,000) — /pnl 누적과 같은 정의
+    assert "최대 낙폭 -5.00%" in caption and "2026-09-29" in caption
+
+
+def test_chart_without_live_records(tmp_path):
+    assert "실주문 기록이 아직 없음" in bot.handle("/chart", FakeExchange(), log_dir=tmp_path, now=NOW)

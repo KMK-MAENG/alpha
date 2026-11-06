@@ -70,6 +70,21 @@ def test_send_without_settings_or_on_network_error_does_not_raise(monkeypatch):
     assert notify.send("hi", token="T", chat_id="1") is False
 
 
+def test_send_photo_posts_multipart_and_does_not_raise_on_error(monkeypatch):
+    sent = []
+    monkeypatch.setattr(notify.urllib.request, "urlopen", lambda request, timeout: sent.append(request))
+    assert notify.send_photo(b"\x89PNGdata", "누적 +1.00%", token="TOKEN", chat_id="42")
+    request = sent[0]
+    assert request.full_url == "https://api.telegram.org/botTOKEN/sendPhoto"
+    assert b"\x89PNGdata" in request.data and "누적 +1.00%".encode() in request.data and b'name="chat_id"' in request.data
+
+    def boom(request, timeout):
+        raise OSError("network down")
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+    assert notify.send_photo(b"x", "c", token="T", chat_id="1") is False
+
+
 @pytest.mark.parametrize("mode, label", [("live", "실주문"), ("dry-run", "DRY-RUN")])
 def test_failure_alert(mode, label):
     text = notify.format_failure(mode, RuntimeError("데이터가 최신이 아님"))

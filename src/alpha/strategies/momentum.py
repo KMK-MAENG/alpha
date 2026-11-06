@@ -16,6 +16,8 @@
   allow_short — 두 엔진 모두 숏 추가 (진입 확인을 대칭으로: 세 기간 모두 마이너스면 숏 진입). 듀얼은 하위 quantile 중 하락 추세 확인 코인
   ts_short — 시계열 엔진에만 숏 추가 (듀얼은 롱 전용). 롱/숏 비율은 코인별 추세 신호가 정한다
   short_market — 이 코인(예: BTCUSDT) 자체가 하락 추세일 때만 숏 허용 (시장 필터)
+  residual — 시장(동일가중 평균, universe가 있으면 그 목록 안) 베타 성분을 뺀 복리 잔차 수익률로 듀얼 순위(정보비율)를 매기고
+    시계열 엔진에 잔차 추세를 50:50 결합 (연구용, 실거래 미채택)
 - liquidity_universe: 매달 거래대금 상위 코인으로 목록을 다시 정한다. 비중 함수에 universe로 주면 순위·동일 비중 계산과
   보유를 그 목록 안에서만 한다 (주지 않으면 closes의 모든 코인)
 날짜 t의 값은 t 종가까지의 정보만 쓴다. 기본 파라미터는 문헌의 표준 조합이며 이 데이터로 고른 값이 아니다.
@@ -117,6 +119,36 @@ def liquidity_universe(
     return chosen.where(month_start, axis=0).ffill().astype(bool)
 
 
+def residual_returns(closes: pd.DataFrame, window: int = VOL_WINDOW, universe: pd.DataFrame | None = None) -> pd.DataFrame:
+    """코인별 수익률에서 그 봉 거래 가능 코인(universe가 있으면 그 목록 안) 동일가중 시장 수익률의 베타 성분을 뺀 잔차 수익률."""
+    rets = closes.pct_change(fill_method=None)
+    mkt = (rets.where(universe) if universe is not None else rets).mean(axis=1)
+    mkt_var = mkt.rolling(window).var()
+    cov = rets.apply(lambda col: col.rolling(window).cov(mkt))
+    return rets.sub(cov.div(mkt_var, axis=0).mul(mkt, axis=0))
+
+
+def _residual_position(
+    resid: pd.Series,
+    lookbacks: list[float] = LOOKBACKS,
+    long_only: bool = False,
+    bars_per_day: int = 1,
+    downside: bool = False,
+    confirm_entry: bool = False,
+) -> pd.Series:
+    """복리 잔차(log(1 + ε))의 룩백별 합 부호 평균 × 잔차 변동성 타게팅 포지션."""
+    bars = [_bars(n, bars_per_day) for n in lookbacks]
+    log_r = np.log1p(resid.clip(lower=-0.99))
+    s = pd.concat([np.sign(log_r.rolling(b).sum()) for b in bars], axis=1).mean(axis=1, skipna=False)
+    if long_only:
+        s = confirmed(s) if confirm_entry else s.clip(lower=0)
+    elif confirm_entry:
+        s = confirmed(s, allow_short=True)
+    window = _bars(VOL_WINDOW, bars_per_day)
+    vol = (_downside_vol(resid, window) if downside else resid.rolling(window).std()) * np.sqrt(365 * bars_per_day)
+    return s * (TARGET_VOL / vol).clip(upper=MAX_LEVERAGE)
+
+
 def cross_sectional_weights(
     closes: pd.DataFrame,
     lookbacks: list[float] = LOOKBACKS,
@@ -125,10 +157,18 @@ def cross_sectional_weights(
     bars_per_day: int = 1,
     universe: pd.DataFrame | None = None,
     exit_quantile: float | None = None,
+    residual: bool = False,
 ) -> pd.DataFrame:
     """closes: 봉 × 코인 종가. 반환: 봉 × 코인 비중 (그 봉 종가에 정해 다음 봉부터 보유)."""
-    vol = closes.pct_change().rolling(_bars(VOL_WINDOW, bars_per_day)).std()
-    returns = [closes.pct_change(_bars(n, bars_per_day)) for n in lookbacks]
+    w_bars = _bars(VOL_WINDOW, bars_per_day)
+    vol = closes.pct_change().rolling(w_bars).std()
+    if residual:
+        resid = residual_returns(closes, w_bars, universe=universe)
+        log_r = np.log1p(resid.clip(lower=-0.99))
+        resid_vol = resid.rolling(w_bars).std()
+        returns = [log_r.rolling(_bars(n, bars_per_day)).sum() / (resid_vol * np.sqrt(_bars(n, bars_per_day))) for n in lookbacks]
+    else:
+        returns = [closes.pct_change(_bars(n, bars_per_day)) for n in lookbacks]
     if universe is not None:
         returns = [r.where(universe) for r in returns]
     ranks = [r.rank(axis=1, pct=True) for r in returns]
@@ -173,10 +213,11 @@ def dual_momentum_weights(
     confirm_entry: bool = False,
     exit_quantile: float | None = None,
     allow_short: bool = False,
+    residual: bool = False,
 ) -> pd.DataFrame:
     selected = cross_sectional_weights(
         closes, lookbacks, quantile, long_only=not allow_short, bars_per_day=bars_per_day, universe=universe,
-        exit_quantile=exit_quantile,
+        exit_quantile=exit_quantile, residual=residual,
     )
     bars = [_bars(n, bars_per_day) for n in lookbacks]
     trend = closes.apply(lambda close: signal(close, bars))
@@ -196,16 +237,32 @@ def time_series_weights(
     downside: bool = False,
     confirm_entry: bool = False,
     allow_short: bool = False,
+    residual: bool = False,
 ) -> pd.DataFrame:
     """코인별 시계열 포지션(기본 롱/무포지션)을 그 봉에 신호가 있는 코인 수로 나눈 비중 (동일 비중 포트폴리오)."""
-    positions = closes.apply(
-        lambda close: position(
-            close, lookbacks, not allow_short, bars_per_day, downside=downside, confirm_entry=confirm_entry
+    def _equal_weight(pos: pd.DataFrame) -> pd.DataFrame:
+        if universe is not None:
+            pos = pos.where(universe)
+        return pos.fillna(0.0).div(pos.notna().sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+
+    raw = _equal_weight(
+        closes.apply(
+            lambda close: position(
+                close, lookbacks, not allow_short, bars_per_day, downside=downside, confirm_entry=confirm_entry
+            )
         )
     )
-    if universe is not None:
-        positions = positions.where(universe)
-    return positions.fillna(0.0).div(positions.notna().sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+    if not residual:
+        return raw
+    resid = residual_returns(closes, _bars(VOL_WINDOW, bars_per_day), universe=universe)
+    res = _equal_weight(
+        resid.apply(
+            lambda col: _residual_position(
+                col, lookbacks, not allow_short, bars_per_day, downside=downside, confirm_entry=confirm_entry
+            )
+        )
+    )
+    return 0.5 * raw + 0.5 * res
 
 
 def vol_targeted(
@@ -242,14 +299,15 @@ def combined_weights(
     allow_short: bool = False,
     short_market: str | None = None,
     ts_short: bool = False,
+    residual: bool = False,
 ) -> pd.DataFrame:
     dual = dual_momentum_weights(
         closes, lookbacks, bars_per_day=bars_per_day, universe=universe, confirm_entry=confirm_entry,
-        exit_quantile=exit_quantile, allow_short=allow_short,
+        exit_quantile=exit_quantile, allow_short=allow_short, residual=residual,
     )
     ts = time_series_weights(
         closes, lookbacks, bars_per_day=bars_per_day, universe=universe, downside=downside,
-        confirm_entry=confirm_entry, allow_short=allow_short or ts_short,
+        confirm_entry=confirm_entry, allow_short=allow_short or ts_short, residual=residual,
     )
     if short_market is not None:  # 시장 코인 자체가 하락 추세일 때만 숏
         market = signal(closes[short_market], [_bars(n, bars_per_day) for n in lookbacks])

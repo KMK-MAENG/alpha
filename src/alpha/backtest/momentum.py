@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from alpha.data import load_candles, load_funding, load_vision, vision_symbols
-from alpha.strategies import indicators, ml, momentum
+from alpha.strategies import carry, indicators, ml, momentum
 
 FEE = 0.0005  # 편도 테이커
 SENSITIVITY_LOOKBACKS = [5, 10, 20, 40, 60, 90, 120, 180, 250]
@@ -463,13 +463,22 @@ def trend_variants_main() -> None:
 
 
 def _short_variants(closes: pd.DataFrame, universe: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
-    """실행 전에 고정한 숏 변형 (모두 진입 확인, 숏도 대칭으로 확인). S1이 실거래 설정(LIVE_OPTIONS)으로 채택됐다."""
+    """S0~S3은 실행 전에 고정한 숏 변형(모두 진입 확인, 숏도 대칭으로 확인)이고 S1이 실거래 설정(LIVE_OPTIONS)으로 채택됐다.
+    S4는 사후 추가한 잔차 모멘텀 변형(보류)이다."""
     base = dict(universe=universe, confirm_entry=True)
     return {
         "S0 롱 전용": momentum.combined_weights(closes, **base),
         "S1 시계열 숏 (실거래)": momentum.combined_weights(closes, ts_short=True, **base),
         "S2 시계열+듀얼 숏": momentum.combined_weights(closes, allow_short=True, **base),
         "S3 S2+시장 필터": momentum.combined_weights(closes, allow_short=True, short_market="BTCUSDT", **base),
+        "S4 S1+잔차 모멘텀": momentum.combined_weights(closes, ts_short=True, residual=True, **base),
+    }
+
+
+def _subperiod_sharpes(pnl: pd.DataFrame) -> dict[str, float]:
+    return {
+        "22~25 Sharpe": summary(pnl.loc["2022-01-01":"2025-09-30"])["Sharpe"],
+        "보류 Sharpe": summary(pnl.loc["2025-10-01":])["Sharpe"],
     }
 
 
@@ -482,7 +491,7 @@ def _short_report(title: str, closes: pd.DataFrame, fundings: dict, variants: di
         held = w.shift(1)
         price = held * returns.reindex_like(held)
         years = len(pnl) / 365
-        rows[name] = summary(pnl) | {
+        rows[name] = summary(pnl) | _subperiod_sharpes(pnl) | {
             "롱 노출": w.clip(lower=0).sum(axis=1).mean(),
             "숏 노출": -w.clip(upper=0).sum(axis=1).mean(),
             "롱 가격손익(연)": price.where(held > 0).sum().sum() / years,
@@ -493,22 +502,46 @@ def _short_report(title: str, closes: pd.DataFrame, fundings: dict, variants: di
     print(f"연도별 수익 (복리)\n{pd.DataFrame(yearly).round(3).to_string()}")
 
 
+def _carry_blend_row(closes: pd.DataFrame, fundings: dict, w_mom: pd.DataFrame, w_car: pd.DataFrame, start: str) -> dict:
+    w = (0.5 * w_mom + 0.5 * w_car).loc[start:]
+    pnl = portfolio_pnl(closes, fundings, w).loc[start:]
+    s = summary(pnl)
+    return {"Sharpe": s["Sharpe"], "연평균 수익": s["연평균 수익"], "MDD": s["MDD"]} | _subperiod_sharpes(pnl)
+
+
 def shorts_main() -> None:
     closes = pd.DataFrame({sym: load_candles("1d", sym)["close"] for sym in UNIVERSE})
     fundings = {sym: load_funding(sym) for sym in UNIVERSE}
+    u1_variants = _short_variants(closes)
     _short_report("고정 56개 (지금 거래 중인 코인만 — 폭락해 사라진 코인이 없어 숏에 불리)",
-                  closes, fundings, _short_variants(closes), "2020-06-14")
+                  closes, fundings, u1_variants, "2020-06-14")
 
     data = {sym: load_vision(sym) for sym in vision_symbols()}
     vclose = pd.DataFrame({s: c["close"].where(c["volume"] > 0) for s, (c, _) in data.items()})
     volume = pd.DataFrame({s: c["quote_volume"] for s, (c, _) in data.items()})
     vfund = {s: f for s, (_, f) in data.items()}
     cohort = [s for s in vclose if vclose[s].first_valid_index() < pd.Timestamp("2021-01-01", tz="UTC")]
+    u2_variants = _short_variants(vclose[cohort])
     _short_report(f"2020년 말 이전 상장 코호트 {len(cohort)}개 (상장 폐지 포함)",
-                  vclose[cohort], vfund, _short_variants(vclose[cohort]), "2021-01-01")
+                  vclose[cohort], vfund, u2_variants, "2021-01-01")
     dynamic = momentum.liquidity_universe(vclose, volume, top_n=50)
+    u3_variants = _short_variants(vclose, universe=dynamic)
     _short_report("매달 거래대금 상위 50 (상장 폐지·신규 코인 포함)",
-                  vclose, vfund, _short_variants(vclose, universe=dynamic), "2021-01-01")
+                  vclose, vfund, u3_variants, "2021-01-01")
+
+    # S1 vs S4 + 캐리(LIVE_OPTIONS) 50:50 결합 비교 (U1, U2, U3)
+    car_u1 = carry.carry_weights(closes, fundings, **carry.LIVE_OPTIONS)["W"]
+    car_u2 = carry.carry_weights(vclose[cohort], {s: vfund[s] for s in cohort}, **carry.LIVE_OPTIONS)["W"]
+    top60 = volume.where(vclose.notna()).rolling(30, min_periods=1).mean().rank(axis=1, ascending=False, method="min") <= 60
+    car_u3_top60 = carry.carry_weights(vclose, vfund, extra_mask=top60, **carry.LIVE_OPTIONS)["W"]
+    car_u3_dyn50 = carry.carry_weights(vclose, vfund, extra_mask=dynamic, **carry.LIVE_OPTIONS)["W"]
+    blend_rows = {}
+    for key in ("S1 시계열 숏 (실거래)", "S4 S1+잔차 모멘텀"):
+        blend_rows[f"U1 고정56 · {key}"] = _carry_blend_row(closes, fundings, u1_variants[key], car_u1, "2020-06-14")
+        blend_rows[f"U2 코호트80 · {key}"] = _carry_blend_row(vclose[cohort], vfund, u2_variants[key], car_u2, "2021-01-01")
+        blend_rows[f"U3 동적(캐리 일간상위60) · {key}"] = _carry_blend_row(vclose, vfund, u3_variants[key], car_u3_top60, "2021-01-01")
+        blend_rows[f"U3 동적(캐리 월간상위50) · {key}"] = _carry_blend_row(vclose, vfund, u3_variants[key], car_u3_dyn50, "2021-01-01")
+    print(f"\n[모멘텀 50% + 캐리(스퀴즈 방어) 50% 결합]\n{pd.DataFrame.from_dict(blend_rows, orient='index').round(3).to_string()}")
 
 
 def main() -> None:
